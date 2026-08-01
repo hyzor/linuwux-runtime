@@ -180,6 +180,16 @@ update_submodules() {
         info "  --force: deiniting submodules for a full clean update"
         git -C "$SRC_DIR" submodule deinit -f --all 2>/dev/null || true
     fi
+
+    if [[ "$VARIANT" == "cachyos" ]]; then
+        local wine_url="https://github.com/CachyOS/wine-cachyos.git"
+        info "  Pointing wine submodule at $wine_url"
+        info "  (upstream .gitmodules references CachyOS/wine, which is not publicly reachable)"
+        git -C "$SRC_DIR" config submodule.wine.url "$wine_url"
+        sed -i -E "s|^([[:space:]]*url[[:space:]]*=[[:space:]]*)\.\./wine([[:space:]]*)$|\1$wine_url\2|" \
+            "$SRC_DIR/.gitmodules" || true
+    fi
+
     git -C "$SRC_DIR" submodule update --init --recursive --force --filter=tree:0 \
         || die "Submodule update failed"
 }
