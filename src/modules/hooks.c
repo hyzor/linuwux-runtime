@@ -24,6 +24,7 @@
 
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <errno.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stddef.h>
@@ -41,7 +42,6 @@
 typedef int (*sigaction_fn)(int, const struct sigaction *, struct sigaction *);
 static sigaction_fn real_sigaction;
 static void (*real_free)(void *);
-static _Thread_local int resolving_free;
 static _Thread_local void *last_win32u_free;
 
 /* Only sa_sigaction is chained; store it atomically to avoid torn struct copies. */
@@ -86,6 +86,24 @@ static void linuwux_sigsys_wrapper(int sig, siginfo_t *info, void *uctx)
     linuwux_chain_sigsys(sig, info, uctx);
 }
 
+/* dlsym(RTLD_NEXT) inside free() crashes during loader startup (before
+ * constructors run) when a library is co-preloaded. Resolve up front. */
+__attribute__((constructor))
+static void linuwux_hooks_resolve_libc(void)
+{
+    void *libc_handle = dlopen("libc.so.6", RTLD_NOW);
+    if (libc_handle) {
+        real_free = (void (*)(void *))dlsym(libc_handle, "free");
+        real_sigaction = (sigaction_fn)dlsym(libc_handle, "sigaction");
+    }
+    if (!real_free)
+        real_free = (void (*)(void *))dlsym(RTLD_NEXT, "free");
+    if (!real_sigaction)
+        real_sigaction = (sigaction_fn)dlsym(RTLD_NEXT, "sigaction");
+    if (!real_free || !real_sigaction)
+        linuwux_log("failed to resolve libc free/sigaction; dropping frees\n");
+}
+
 __attribute__((visibility("default")))
 void free(void *ptr)
 {
@@ -93,11 +111,10 @@ void free(void *ptr)
     void *caller;
     int from_win32u = 0;
 
-    if (!real_free && !resolving_free) {
-        resolving_free = 1;
-        real_free = (void (*)(void *))dlsym(RTLD_NEXT, "free");
-        resolving_free = 0;
-    }
+    /* Pre-constructor (loader startup) frees are dropped: resolving here
+     * crashes; the few leaked allocations are a one-time cost. */
+    if (!real_free)
+        return;
 
     caller = __builtin_return_address(0);
     if (ptr && linuwux_is_game_process() && linuwux_cpuid_legacy_active() &&
@@ -111,8 +128,7 @@ void free(void *ptr)
     if (from_win32u)
         last_win32u_free = ptr;
 
-    if (real_free)
-        real_free(ptr);
+    real_free(ptr);
 }
 
 /* Enable CPUID faults once; TIF_NOCPUID is inherited by new threads on clone. */
@@ -129,8 +145,10 @@ static void linuwux_enable_cpuid_fault(void)
 __attribute__((visibility("default")))
 int sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
 {
-    if (!real_sigaction)
-        real_sigaction = (sigaction_fn)dlsym(RTLD_NEXT, "sigaction");
+    if (!real_sigaction) {
+        errno = ENOSYS;
+        return -1;
+    }
 
     if (!linuwux_is_game_process())
         return real_sigaction(signum, act, oldact);
