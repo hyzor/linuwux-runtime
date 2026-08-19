@@ -2,3 +2,4 @@ dist/*
 tests/.stage
 tests/build
 tests/markers
+logs
